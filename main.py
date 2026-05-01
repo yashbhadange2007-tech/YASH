@@ -31,17 +31,19 @@ def detect_drawing_type(filepath):
         return "civil"
     return "mechanical"
 
+# ─── UPDATED: Now accepts the "mode" query parameter from AutoCAD ───
 @app.post("/annotate")
-async def run_annotate(file: UploadFile = File(...)):
+async def run_annotate(mode: str = "both", file: UploadFile = File(...)):
     try:
         tmp=os.path.join(TEMP_DIR,f"in_{uuid.uuid4().hex}.dxf")
         with open(tmp,"wb") as f: f.write(await file.read())
 
         drawing_type=detect_drawing_type(tmp)
-        print(f"Annotating as: {drawing_type}")
+        print(f"Annotating as: {drawing_type} (Mode: {mode})")
 
         if drawing_type=="civil":
-            doc=annotate_civil(tmp)
+            # Passes the specific mode (columns, beams, centerlines, or both) to the civil engine
+            doc=annotate_civil(tmp, mode=mode)
         else:
             doc=annotate_mechanical(tmp)
 
