@@ -1,5 +1,5 @@
 """
-Civil Drawing Annotator v15 — RIGHT-SIDE COLUMN LABELS
+Civil Drawing Annotator v16 — RIGHT-SIDE COLUMN LABELS + CENTERLINES
 ═══════════════════════════════════════════════════════════════════════
 PLACEMENT CONVENTION:
 
@@ -246,9 +246,120 @@ def extract_beams(filepath, extents):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# CENTERLINE ENGINE (NEW - Integrates exactly with existing math)
+# ═══════════════════════════════════════════════════════════════════════════════
+def draw_centerlines(doc, msp, columns, extents):
+    if not columns: return
+    
+    if "CENTER_LINES" not in doc.layers:
+        doc.layers.new("CENTER_LINES")
+
+    # Ensure dashed linetype exists in document
+    if "CENTER" not in doc.linetypes:
+        doc.linetypes.add("CENTER", "Center ____ _ ____ _ ____", [1.25, 0.25, -0.25, 0.25, -0.25])
+
+    # 1. Determine the outer faces (0.000 baseline)
+    min_x_face = min(c['cx'] - c['w']/2 for c in columns)
+    max_x_face = max(c['cx'] + c['w']/2 for c in columns)
+    min_y_face = min(c['cy'] - c['h']/2 for c in columns)
+    max_y_face = max(c['cy'] + c['h']/2 for c in columns)
+    
+    bw = extents["w"]
+    th = max(bw * 0.012, 0.15) # Dynamic text height
+    tol = max(bw * 0.005, 0.02) # Tolerance for aligning grid lines
+
+    def get_col_nums(cols):
+        nums = []
+        for c in cols:
+            m = re.search(r'\d+', c['label'])
+            if m: nums.append(int(m.group(0)))
+        nums.sort()
+        return ",".join(str(n) for n in nums)
+
+    # 2. Group columns into grids
+    h_groups = []
+    for col in sorted(columns, key=lambda c: c['cy']):
+        if not h_groups or abs(col['cy'] - h_groups[-1]['y']) > tol:
+            h_groups.append({'y': col['cy'], 'cols': [col]})
+        else:
+            h_groups[-1]['cols'].append(col)
+            h_groups[-1]['y'] = sum(c['cy'] for c in h_groups[-1]['cols']) / len(h_groups[-1]['cols'])
+            
+    v_groups = []
+    for col in sorted(columns, key=lambda c: c['cx']):
+        if not v_groups or abs(col['cx'] - v_groups[-1]['x']) > tol:
+            v_groups.append({'x': col['cx'], 'cols': [col]})
+        else:
+            v_groups[-1]['cols'].append(col)
+            v_groups[-1]['x'] = sum(c['cx'] for c in v_groups[-1]['cols']) / len(v_groups[-1]['cols'])
+
+    # Color cycling matches user screenshot
+    color_cycle = [2, 6, 7, 3, 5, 4, 1] 
+    ext_len = bw * 0.15
+    
+    # ── DRAW HORIZONTAL GRIDS (Left Side) ──
+    left_x = min_x_face - ext_len
+    right_x = max_x_face + (ext_len * 0.2)
+    
+    msp.add_line((left_x, min_y_face), (right_x, min_y_face), dxfattribs={"layer": "CENTER_LINES", "color": 5, "linetype": "CENTER"})
+    txt = msp.add_text(f"START FACE 0.000", dxfattribs={"insert": (left_x, min_y_face + th*0.3), "height": th, "color": 5, "layer": "CENTER_LINES"})
+    txt.set_pos((left_x, min_y_face + th*0.3), align='RIGHT')
+
+    msp.add_line((left_x, max_y_face), (right_x, max_y_face), dxfattribs={"layer": "CENTER_LINES", "color": 1, "linetype": "CENTER"})
+    txt = msp.add_text(f"END FACE {max_y_face - min_y_face:.3f}", dxfattribs={"insert": (left_x, max_y_face + th*0.3), "height": th, "color": 1, "layer": "CENTER_LINES"})
+    txt.set_pos((left_x, max_y_face + th*0.3), align='RIGHT')
+
+    prev_text_y = -999999
+    for i, g in enumerate(h_groups):
+        y = g['y']
+        dist = y - min_y_face
+        lbl = f"C {get_col_nums(g['cols'])} {dist:.3f}"
+        c = color_cycle[i % len(color_cycle)]
+        
+        text_y = y
+        if text_y - prev_text_y < th * 1.8:
+            text_y = prev_text_y + th * 1.8
+        prev_text_y = text_y
+        
+        msp.add_line((left_x + ext_len*0.2, y), (right_x, y), dxfattribs={"layer": "CENTER_LINES", "color": c, "linetype": "CENTER"})
+        msp.add_lwpolyline([(left_x + ext_len*0.2, y), (left_x + ext_len*0.1, y), (left_x, text_y)], dxfattribs={"layer": "CENTER_LINES", "color": c})
+        txt = msp.add_text(lbl, dxfattribs={"insert": (left_x - th*0.5, text_y), "height": th, "color": c, "layer": "CENTER_LINES"})
+        txt.set_pos((left_x - th*0.5, text_y), align='RIGHT')
+
+    # ── DRAW VERTICAL GRIDS (Bottom Side) ──
+    bot_y = min_y_face - ext_len
+    top_y = max_y_face + (ext_len * 0.2)
+    
+    msp.add_line((min_x_face, bot_y), (min_x_face, top_y), dxfattribs={"layer": "CENTER_LINES", "color": 2, "linetype": "CENTER"})
+    txt = msp.add_text(f"START FACE 0.000", dxfattribs={"insert": (min_x_face - th*0.3, bot_y), "height": th, "color": 2, "layer": "CENTER_LINES", "rotation": 90})
+    txt.set_pos((min_x_face - th*0.3, bot_y), align='RIGHT')
+
+    msp.add_line((max_x_face, bot_y), (max_x_face, top_y), dxfattribs={"layer": "CENTER_LINES", "color": 1, "linetype": "CENTER"})
+    txt = msp.add_text(f"END FACE {max_x_face - min_x_face:.3f}", dxfattribs={"insert": (max_x_face - th*0.3, bot_y), "height": th, "color": 1, "layer": "CENTER_LINES", "rotation": 90})
+    txt.set_pos((max_x_face - th*0.3, bot_y), align='RIGHT')
+
+    prev_text_x = -999999
+    for i, g in enumerate(v_groups):
+        x = g['x']
+        dist = x - min_x_face
+        lbl = f"C {get_col_nums(g['cols'])} {dist:.3f}"
+        c = color_cycle[i % len(color_cycle)]
+        
+        text_x = x
+        if text_x - prev_text_x < th * 1.8:
+            text_x = prev_text_x + th * 1.8
+        prev_text_x = text_x
+        
+        msp.add_line((x, bot_y + ext_len*0.2), (x, top_y), dxfattribs={"layer": "CENTER_LINES", "color": c, "linetype": "CENTER"})
+        msp.add_lwpolyline([(x, bot_y + ext_len*0.2), (x, bot_y + ext_len*0.1), (text_x, bot_y)], dxfattribs={"layer": "CENTER_LINES", "color": c})
+        txt = msp.add_text(lbl, dxfattribs={"insert": (text_x - th*0.3, bot_y - th*0.5), "height": th, "color": c, "layer": "CENTER_LINES", "rotation": 90})
+        txt.set_pos((text_x - th*0.3, bot_y - th*0.5), align='RIGHT')
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN ANNOTATOR
 # ═══════════════════════════════════════════════════════════════════════════════
-def annotate_civil(filepath):
+def annotate_civil(filepath, mode="both"):
     doc = ezdxf.readfile(filepath)
     msp = doc.modelspace()
 
@@ -270,6 +381,10 @@ def annotate_civil(filepath):
     beams       = extract_beams(filepath, extents)
     print(f"  Cols:{len(col_inserts)}  Beams:{len(beams)}")
     if not col_inserts: return doc
+
+    # ── NEW: CENTERLINES ──────────────────────────────────────────────────────
+    if mode in ["both", "centerlines"]:
+        draw_centerlines(doc, msp, col_inserts, extents)
 
     # ── LAYERS ────────────────────────────────────────────────────────────────
     for nm, col_no, lw in [
@@ -369,26 +484,53 @@ def annotate_civil(filepath):
     # ═══════════════════════════════════════════════════════════════════════════
     # STEP 1 — COLUMN LABEL BOXES  (centred ON column rectangle)
     # ═══════════════════════════════════════════════════════════════════════════
-    for col in col_inserts:
-        cx    = col["cx"]; cy = col["cy"]
-        cw    = col["w"];  ch = col["h"]
-        label = col["label"]
-        size  = col["size"]          # "" for LIFT, "- - -" for FC
-        is_lift = (col["col_type"] == "LIFT")
+    if mode in ["both", "columns"]:
+        for col in col_inserts:
+            cx    = col["cx"]; cy = col["cy"]
+            cw    = col["w"];  ch = col["h"]
+            label = col["label"]
+            size  = col["size"]          # "" for LIFT, "- - -" for FC
+            is_lift = (col["col_type"] == "LIFT")
 
-        # ── available area inside column ─────────────────────────────────────
-        # Allow box to be LARGER than the column rectangle — text drives the size
-        avail_w = cw * 1.0
-        avail_h = ch * 1.0
+            # ── available area inside column ─────────────────────────────────────
+            # Allow box to be LARGER than the column rectangle — text drives the size
+            avail_w = cw * 1.0
+            avail_h = ch * 1.0
 
-        if is_lift:
-            # Text height = fill half the column height, no global cap
-            th_l = round(avail_h * 0.50, 4)
-            pad  = round(th_l * 0.15, 4)
-            bw_  = round(tw(label, th_l) + pad*2, 4)
-            bh_  = round(th_l + pad*2, 4)
+            if is_lift:
+                # Text height = fill half the column height, no global cap
+                th_l = round(avail_h * 0.50, 4)
+                pad  = round(th_l * 0.15, 4)
+                bw_  = round(tw(label, th_l) + pad*2, 4)
+                bh_  = round(th_l + pad*2, 4)
 
-            # Place box to the RIGHT of column (v15)
+                # Place box to the RIGHT of column (v15)
+                col_right = cx + cw / 2
+                gap       = round(bh_ * 0.30, 4)
+                box_cx    = round(col_right + gap + bw_ / 2, 4)
+                box_cy    = cy
+
+                draw_centred_box(box_cx, box_cy, bw_, bh_,
+                                 label, th_l,
+                                 "",    th_l,
+                                 "COL_LABEL", 2, 35)
+                continue
+
+            # ── Two-row box: label (top) + size (bottom) ──────────────────────────
+            # Split column height equally between two rows, no global cap
+            th_l = round(avail_h * 0.38, 4)   # label row  ~40% of col height
+            th_s = round(avail_h * 0.32, 4)   # size  row  ~35% of col height
+
+            pad    = round(th_l * 0.10, 4)
+            row_l  = th_l + pad*2
+            row_s  = th_s + pad*2
+            total_h = row_l + row_s
+
+            # Box width driven purely by the wider of the two texts
+            bw_ = round(max(tw(label, th_l), tw(size, th_s)) + pad*2, 4)
+            bh_ = round(total_h, 4)
+
+            # Place box to the RIGHT of column
             col_right = cx + cw / 2
             gap       = round(bh_ * 0.30, 4)
             box_cx    = round(col_right + gap + bw_ / 2, 4)
@@ -396,107 +538,82 @@ def annotate_civil(filepath):
 
             draw_centred_box(box_cx, box_cy, bw_, bh_,
                              label, th_l,
-                             "",    th_l,
+                             size,  th_s,
                              "COL_LABEL", 2, 35)
-            continue
-
-        # ── Two-row box: label (top) + size (bottom) ──────────────────────────
-        # Split column height equally between two rows, no global cap
-        th_l = round(avail_h * 0.38, 4)   # label row  ~40% of col height
-        th_s = round(avail_h * 0.32, 4)   # size  row  ~35% of col height
-
-        pad    = round(th_l * 0.10, 4)
-        row_l  = th_l + pad*2
-        row_s  = th_s + pad*2
-        total_h = row_l + row_s
-
-        # Box width driven purely by the wider of the two texts
-        bw_ = round(max(tw(label, th_l), tw(size, th_s)) + pad*2, 4)
-        bh_ = round(total_h, 4)
-
-        # Place box to the RIGHT of column
-        col_right = cx + cw / 2
-        gap       = round(bh_ * 0.30, 4)
-        box_cx    = round(col_right + gap + bw_ / 2, 4)
-        box_cy    = cy
-
-        draw_centred_box(box_cx, box_cy, bw_, bh_,
-                         label, th_l,
-                         size,  th_s,
-                         "COL_LABEL", 2, 35)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # STEP 2 — BEAM LABEL BOXES  (centred ON beam rectangle)
     # ═══════════════════════════════════════════════════════════════════════════
-    for beam in beams:
-        cx    = beam["cx"]; cy = beam["cy"]
-        label = beam["label"]
-        o     = beam["o"]
+    if mode in ["both", "beams"]:
+        for beam in beams:
+            cx    = beam["cx"]; cy = beam["cy"]
+            label = beam["label"]
+            o     = beam["o"]
 
-        # ── REAL beam dimensions from bounding box ────────────────────────────
-        if o == "H":
-            beam_span = beam["bx2"] - beam["bx1"]
-            beam_thk  = beam["by2"] - beam["by1"]
-        else:
-            beam_span = beam["by2"] - beam["by1"]
-            beam_thk  = beam["bx2"] - beam["bx1"]
+            # ── REAL beam dimensions from bounding box ────────────────────────────
+            if o == "H":
+                beam_span = beam["bx2"] - beam["bx1"]
+                beam_thk  = beam["by2"] - beam["by1"]
+            else:
+                beam_span = beam["by2"] - beam["by1"]
+                beam_thk  = beam["bx2"] - beam["bx1"]
 
-        if beam_thk < 0.05:
-            beam_thk = beam.get("thickness", bw / 60)
-        if beam_thk < 0.05:
-            beam_thk = bw / 60
+            if beam_thk < 0.05:
+                beam_thk = beam.get("thickness", bw / 60)
+            if beam_thk < 0.05:
+                beam_thk = bw / 60
 
-        # ── CHARACTER WIDTH RATIO ─────────────────────────────────────────────
-        # AutoCAD romans/txt font: actual glyph width ≈ 0.66 × height.
-        # We use 0.70 — accurate enough to make box snug without overflow.
-        CW_BEAM = 0.70
+            # ── CHARACTER WIDTH RATIO ─────────────────────────────────────────────
+            # AutoCAD romans/txt font: actual glyph width ≈ 0.66 × height.
+            # We use 0.70 — accurate enough to make box snug without overflow.
+            CW_BEAM = 0.70
 
-        # ── TEXT HEIGHT ───────────────────────────────────────────────────────
-        # Vertical padding inside box = 20% of beam thickness (both top+bottom).
-        v_pad   = beam_thk * 0.20
-        th_b    = round(beam_thk - v_pad * 2, 4)
+            # ── TEXT HEIGHT ───────────────────────────────────────────────────────
+            # Vertical padding inside box = 20% of beam thickness (both top+bottom).
+            v_pad   = beam_thk * 0.20
+            th_b    = round(beam_thk - v_pad * 2, 4)
 
-        # Global scale guard: never smaller than bw/90, never larger than bw/18
-        th_b = round(min(th_b, bw / 18), 4)
-        th_b = round(max(th_b, bw / 90), 4)
+            # Global scale guard: never smaller than bw/90, never larger than bw/18
+            th_b = round(min(th_b, bw / 18), 4)
+            th_b = round(max(th_b, bw / 90), 4)
 
-        # ── BOX DIMENSIONS ────────────────────────────────────────────────────
-        # Width = exact text width + horizontal padding (12% each side).
-        # This makes every box exactly fit its own label — no constant-size boxes.
-        h_pad  = round(th_b * 0.35, 4)          # horizontal pad each side
-        text_w = len(label) * CW_BEAM * th_b
-        bm_w   = round(text_w + h_pad * 2, 4)
+            # ── BOX DIMENSIONS ────────────────────────────────────────────────────
+            # Width = exact text width + horizontal padding (12% each side).
+            # This makes every box exactly fit its own label — no constant-size boxes.
+            h_pad  = round(th_b * 0.35, 4)          # horizontal pad each side
+            text_w = len(label) * CW_BEAM * th_b
+            bm_w   = round(text_w + h_pad * 2, 4)
 
-        # Height = text height + vertical padding
-        bm_h   = round(th_b + v_pad * 2, 4)
+            # Height = text height + vertical padding
+            bm_h   = round(th_b + v_pad * 2, 4)
 
-        # Safety: box height must not exceed beam thickness
-        bm_h = round(min(bm_h, beam_thk), 4)
+            # Safety: box height must not exceed beam thickness
+            bm_h = round(min(bm_h, beam_thk), 4)
 
-        # ── PLACEMENT ─────────────────────────────────────────────────────────
-        # FIX 2: H beam → box floats ABOVE beam top edge (original correct behaviour)
-        #        V beam → box placed to the RIGHT of beam right edge.
-        #        Vertical beam labels placed above looked identical to H beam labels
-        #        and were ambiguous/misleading on the drawing.
-        if o == "H":
-            beam_top = beam["by2"]
-            gap_b    = round(bm_h * 0.30, 4)
-            box_cx   = cx
-            box_cy   = round(beam_top + gap_b + bm_h / 2, 4)
-        else:
-            # V beam: box sits to the RIGHT of the beam, vertically centred on beam
-            beam_right = beam["bx2"]
-            gap_b      = round(bm_w * 0.20, 4)   # horizontal gap = 20% of box width
-            box_cx     = round(beam_right + gap_b + bm_w / 2, 4)
-            box_cy     = cy   # vertically centred on beam midpoint
+            # ── PLACEMENT ─────────────────────────────────────────────────────────
+            # FIX 2: H beam → box floats ABOVE beam top edge (original correct behaviour)
+            #        V beam → box placed to the RIGHT of beam right edge.
+            #        Vertical beam labels placed above looked identical to H beam labels
+            #        and were ambiguous/misleading on the drawing.
+            if o == "H":
+                beam_top = beam["by2"]
+                gap_b    = round(bm_h * 0.30, 4)
+                box_cx   = cx
+                box_cy   = round(beam_top + gap_b + bm_h / 2, 4)
+            else:
+                # V beam: box sits to the RIGHT of the beam, vertically centred on beam
+                beam_right = beam["bx2"]
+                gap_b      = round(bm_w * 0.20, 4)   # horizontal gap = 20% of box width
+                box_cx     = round(beam_right + gap_b + bm_w / 2, 4)
+                box_cy     = cy   # vertically centred on beam midpoint
 
-        draw_centred_box(box_cx, box_cy, bm_w, bm_h,
-                         label, th_b,
-                         "",    th_b,
-                         "BEAM_LABEL", 1, 25, cw=CW_BEAM, draw_box=False)
+            draw_centred_box(box_cx, box_cy, bm_w, bm_h,
+                             label, th_b,
+                             "",    th_b,
+                             "BEAM_LABEL", 1, 25, cw=CW_BEAM, draw_box=False)
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 3 — OVERALL DIMENSIONS  (DISABLED — overall dims removed per request)
+    # STEP 3 — OVERALL DIMENSIONS  
     # ═══════════════════════════════════════════════════════════════════════════
     # dim_off = round(th_dim * 8.0, 4)
 
