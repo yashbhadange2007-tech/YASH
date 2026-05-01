@@ -246,7 +246,7 @@ def extract_beams(filepath, extents):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CENTERLINE ENGINE (NEW - Integrates exactly with existing math)
+# CENTERLINE ENGINE (NEW - Bulletproof math and alignment)
 # ═══════════════════════════════════════════════════════════════════════════════
 def draw_centerlines(doc, msp, columns, extents):
     if not columns: return
@@ -258,7 +258,7 @@ def draw_centerlines(doc, msp, columns, extents):
     if "CENTER" not in doc.linetypes:
         doc.linetypes.add("CENTER", "Center ____ _ ____ _ ____", [1.25, 0.25, -0.25, 0.25, -0.25])
 
-    # 1. Determine the outer faces (0.000 baseline)
+    # Determine outer faces (0.000 baseline)
     min_x_face = min(c['cx'] - c['w']/2 for c in columns)
     max_x_face = max(c['cx'] + c['w']/2 for c in columns)
     min_y_face = min(c['cy'] - c['h']/2 for c in columns)
@@ -276,7 +276,7 @@ def draw_centerlines(doc, msp, columns, extents):
         nums.sort()
         return ",".join(str(n) for n in nums)
 
-    # 2. Group columns into grids
+    # Group columns into grids
     h_groups = []
     for col in sorted(columns, key=lambda c: c['cy']):
         if not h_groups or abs(col['cy'] - h_groups[-1]['y']) > tol:
@@ -301,14 +301,16 @@ def draw_centerlines(doc, msp, columns, extents):
     left_x = min_x_face - ext_len
     right_x = max_x_face + (ext_len * 0.2)
     
+    # Horizontal Face Labels
     msp.add_line((left_x, min_y_face), (right_x, min_y_face), dxfattribs={"layer": "CENTER_LINES", "color": 5, "linetype": "CENTER"})
-    txt = msp.add_text(f"START FACE 0.000", dxfattribs={"insert": (left_x, min_y_face + th*0.3), "height": th, "color": 5, "layer": "CENTER_LINES"})
-    txt.set_pos((left_x, min_y_face + th*0.3), align='RIGHT')
+    txt_lbl = "START FACE 0.000"
+    msp.add_text(txt_lbl, dxfattribs={"insert": (left_x - tw(txt_lbl, th) - th*0.5, min_y_face - th*0.5), "height": th, "color": 5, "layer": "CENTER_LINES"})
 
     msp.add_line((left_x, max_y_face), (right_x, max_y_face), dxfattribs={"layer": "CENTER_LINES", "color": 1, "linetype": "CENTER"})
-    txt = msp.add_text(f"END FACE {max_y_face - min_y_face:.3f}", dxfattribs={"insert": (left_x, max_y_face + th*0.3), "height": th, "color": 1, "layer": "CENTER_LINES"})
-    txt.set_pos((left_x, max_y_face + th*0.3), align='RIGHT')
+    txt_lbl = f"END FACE {max_y_face - min_y_face:.3f}"
+    msp.add_text(txt_lbl, dxfattribs={"insert": (left_x - tw(txt_lbl, th) - th*0.5, max_y_face - th*0.5), "height": th, "color": 1, "layer": "CENTER_LINES"})
 
+    # Horizontal Grid Lines & Staggered Text
     prev_text_y = -999999
     for i, g in enumerate(h_groups):
         y = g['y']
@@ -316,6 +318,7 @@ def draw_centerlines(doc, msp, columns, extents):
         lbl = f"C {get_col_nums(g['cols'])} {dist:.3f}"
         c = color_cycle[i % len(color_cycle)]
         
+        # Calculate dogleg stagger to avoid text overlaps
         text_y = y
         if text_y - prev_text_y < th * 1.8:
             text_y = prev_text_y + th * 1.8
@@ -323,21 +326,22 @@ def draw_centerlines(doc, msp, columns, extents):
         
         msp.add_line((left_x + ext_len*0.2, y), (right_x, y), dxfattribs={"layer": "CENTER_LINES", "color": c, "linetype": "CENTER"})
         msp.add_lwpolyline([(left_x + ext_len*0.2, y), (left_x + ext_len*0.1, y), (left_x, text_y)], dxfattribs={"layer": "CENTER_LINES", "color": c})
-        txt = msp.add_text(lbl, dxfattribs={"insert": (left_x - th*0.5, text_y), "height": th, "color": c, "layer": "CENTER_LINES"})
-        txt.set_pos((left_x - th*0.5, text_y), align='RIGHT')
+        msp.add_text(lbl, dxfattribs={"insert": (left_x - tw(lbl, th) - th*0.5, text_y - th*0.5), "height": th, "color": c, "layer": "CENTER_LINES"})
 
     # ── DRAW VERTICAL GRIDS (Bottom Side) ──
     bot_y = min_y_face - ext_len
     top_y = max_y_face + (ext_len * 0.2)
     
+    # Vertical Face Labels
     msp.add_line((min_x_face, bot_y), (min_x_face, top_y), dxfattribs={"layer": "CENTER_LINES", "color": 2, "linetype": "CENTER"})
-    txt = msp.add_text(f"START FACE 0.000", dxfattribs={"insert": (min_x_face - th*0.3, bot_y), "height": th, "color": 2, "layer": "CENTER_LINES", "rotation": 90})
-    txt.set_pos((min_x_face - th*0.3, bot_y), align='RIGHT')
+    txt_lbl = "START FACE 0.000"
+    msp.add_text(txt_lbl, dxfattribs={"insert": (min_x_face + th*0.5, bot_y - tw(txt_lbl, th) - th*0.5), "height": th, "color": 2, "layer": "CENTER_LINES", "rotation": 90})
 
     msp.add_line((max_x_face, bot_y), (max_x_face, top_y), dxfattribs={"layer": "CENTER_LINES", "color": 1, "linetype": "CENTER"})
-    txt = msp.add_text(f"END FACE {max_x_face - min_x_face:.3f}", dxfattribs={"insert": (max_x_face - th*0.3, bot_y), "height": th, "color": 1, "layer": "CENTER_LINES", "rotation": 90})
-    txt.set_pos((max_x_face - th*0.3, bot_y), align='RIGHT')
+    txt_lbl = f"END FACE {max_x_face - min_x_face:.3f}"
+    msp.add_text(txt_lbl, dxfattribs={"insert": (max_x_face + th*0.5, bot_y - tw(txt_lbl, th) - th*0.5), "height": th, "color": 1, "layer": "CENTER_LINES", "rotation": 90})
 
+    # Vertical Grid Lines & Staggered Text
     prev_text_x = -999999
     for i, g in enumerate(v_groups):
         x = g['x']
@@ -352,9 +356,7 @@ def draw_centerlines(doc, msp, columns, extents):
         
         msp.add_line((x, bot_y + ext_len*0.2), (x, top_y), dxfattribs={"layer": "CENTER_LINES", "color": c, "linetype": "CENTER"})
         msp.add_lwpolyline([(x, bot_y + ext_len*0.2), (x, bot_y + ext_len*0.1), (text_x, bot_y)], dxfattribs={"layer": "CENTER_LINES", "color": c})
-        txt = msp.add_text(lbl, dxfattribs={"insert": (text_x - th*0.3, bot_y - th*0.5), "height": th, "color": c, "layer": "CENTER_LINES", "rotation": 90})
-        txt.set_pos((text_x - th*0.3, bot_y - th*0.5), align='RIGHT')
-
+        msp.add_text(lbl, dxfattribs={"insert": (text_x + th*0.5, bot_y - tw(lbl, th) - th*0.5), "height": th, "color": c, "layer": "CENTER_LINES", "rotation": 90})
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN ANNOTATOR
@@ -426,19 +428,11 @@ def annotate_civil(filepath, mode="both"):
                          top_text, top_th,
                          bot_text, bot_th,
                          layer, color, lw=30, cw=None, draw_box=True):
-        """
-        Draw a rectangle centred at (cx, cy).
-        If bot_text is non-empty: two rows separated by a divider.
-        If bot_text is empty:     single row with top_text only.
-        Text is perfectly centred H+V inside its row.
-        cw: character width ratio override (defaults to global CW=0.80)
-        """
         bx   = cx - box_w / 2
         by   = cy - box_h / 2
         bx2e = bx + box_w
         by2e = by + box_h
 
-        # Outer rectangle (skipped for beam labels — text only)
         if draw_box:
             msp.add_lwpolyline(
                 [(bx,by),(bx2e,by),(bx2e,by2e),(bx,by2e),(bx,by)],
@@ -446,18 +440,15 @@ def annotate_civil(filepath, mode="both"):
                             "closed":True,"lineweight":lw})
 
         if bot_text:
-            # Two rows — split box proportionally by text heights
             ratio    = top_th / (top_th + bot_th)
             top_h    = box_h * ratio
             bot_h    = box_h - top_h
             div_y    = by + bot_h
 
-            # Divider
             msp.add_line((bx, div_y),(bx2e, div_y),
                          dxfattribs={"layer":layer,"color":color,
                                      "lineweight":max(lw//2, 13)})
 
-            # Top row text (label: C1, FC1, etc.)
             text_w = tw(top_text, top_th, cw)
             tx = bx + (box_w - text_w) / 2
             ty = div_y + (top_h - top_th) / 2
@@ -465,7 +456,6 @@ def annotate_civil(filepath, mode="both"):
                 "insert":(tx, ty),"height":top_th,
                 "layer":layer,"color":color})
 
-            # Bottom row text (size: 230X450, etc.)
             text_w2 = tw(bot_text, bot_th, cw)
             tx2 = bx + (box_w - text_w2) / 2
             ty2 = by + (bot_h - bot_th) / 2
@@ -473,7 +463,6 @@ def annotate_civil(filepath, mode="both"):
                 "insert":(tx2, ty2),"height":bot_th,
                 "layer":layer,"color":color})
         else:
-            # Single row — centre text in full box height
             text_w = tw(top_text, top_th, cw)
             tx = bx + (box_w - text_w) / 2
             ty = by + (box_h - top_th) / 2
@@ -482,7 +471,7 @@ def annotate_civil(filepath, mode="both"):
                 "layer":layer,"color":color})
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 1 — COLUMN LABEL BOXES  (centred ON column rectangle)
+    # STEP 1 — COLUMN LABEL BOXES 
     # ═══════════════════════════════════════════════════════════════════════════
     if mode in ["both", "columns"]:
         for col in col_inserts:
@@ -492,19 +481,15 @@ def annotate_civil(filepath, mode="both"):
             size  = col["size"]          # "" for LIFT, "- - -" for FC
             is_lift = (col["col_type"] == "LIFT")
 
-            # ── available area inside column ─────────────────────────────────────
-            # Allow box to be LARGER than the column rectangle — text drives the size
             avail_w = cw * 1.0
             avail_h = ch * 1.0
 
             if is_lift:
-                # Text height = fill half the column height, no global cap
                 th_l = round(avail_h * 0.50, 4)
                 pad  = round(th_l * 0.15, 4)
                 bw_  = round(tw(label, th_l) + pad*2, 4)
                 bh_  = round(th_l + pad*2, 4)
 
-                # Place box to the RIGHT of column (v15)
                 col_right = cx + cw / 2
                 gap       = round(bh_ * 0.30, 4)
                 box_cx    = round(col_right + gap + bw_ / 2, 4)
@@ -516,8 +501,6 @@ def annotate_civil(filepath, mode="both"):
                                  "COL_LABEL", 2, 35)
                 continue
 
-            # ── Two-row box: label (top) + size (bottom) ──────────────────────────
-            # Split column height equally between two rows, no global cap
             th_l = round(avail_h * 0.38, 4)   # label row  ~40% of col height
             th_s = round(avail_h * 0.32, 4)   # size  row  ~35% of col height
 
@@ -526,11 +509,9 @@ def annotate_civil(filepath, mode="both"):
             row_s  = th_s + pad*2
             total_h = row_l + row_s
 
-            # Box width driven purely by the wider of the two texts
             bw_ = round(max(tw(label, th_l), tw(size, th_s)) + pad*2, 4)
             bh_ = round(total_h, 4)
 
-            # Place box to the RIGHT of column
             col_right = cx + cw / 2
             gap       = round(bh_ * 0.30, 4)
             box_cx    = round(col_right + gap + bw_ / 2, 4)
@@ -542,7 +523,7 @@ def annotate_civil(filepath, mode="both"):
                              "COL_LABEL", 2, 35)
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 2 — BEAM LABEL BOXES  (centred ON beam rectangle)
+    # STEP 2 — BEAM LABEL BOXES
     # ═══════════════════════════════════════════════════════════════════════════
     if mode in ["both", "beams"]:
         for beam in beams:
@@ -550,7 +531,6 @@ def annotate_civil(filepath, mode="both"):
             label = beam["label"]
             o     = beam["o"]
 
-            # ── REAL beam dimensions from bounding box ────────────────────────────
             if o == "H":
                 beam_span = beam["bx2"] - beam["bx1"]
                 beam_thk  = beam["by2"] - beam["by1"]
@@ -563,49 +543,31 @@ def annotate_civil(filepath, mode="both"):
             if beam_thk < 0.05:
                 beam_thk = bw / 60
 
-            # ── CHARACTER WIDTH RATIO ─────────────────────────────────────────────
-            # AutoCAD romans/txt font: actual glyph width ≈ 0.66 × height.
-            # We use 0.70 — accurate enough to make box snug without overflow.
             CW_BEAM = 0.70
 
-            # ── TEXT HEIGHT ───────────────────────────────────────────────────────
-            # Vertical padding inside box = 20% of beam thickness (both top+bottom).
             v_pad   = beam_thk * 0.20
             th_b    = round(beam_thk - v_pad * 2, 4)
 
-            # Global scale guard: never smaller than bw/90, never larger than bw/18
             th_b = round(min(th_b, bw / 18), 4)
             th_b = round(max(th_b, bw / 90), 4)
 
-            # ── BOX DIMENSIONS ────────────────────────────────────────────────────
-            # Width = exact text width + horizontal padding (12% each side).
-            # This makes every box exactly fit its own label — no constant-size boxes.
-            h_pad  = round(th_b * 0.35, 4)          # horizontal pad each side
+            h_pad  = round(th_b * 0.35, 4)
             text_w = len(label) * CW_BEAM * th_b
             bm_w   = round(text_w + h_pad * 2, 4)
 
-            # Height = text height + vertical padding
             bm_h   = round(th_b + v_pad * 2, 4)
-
-            # Safety: box height must not exceed beam thickness
             bm_h = round(min(bm_h, beam_thk), 4)
 
-            # ── PLACEMENT ─────────────────────────────────────────────────────────
-            # FIX 2: H beam → box floats ABOVE beam top edge (original correct behaviour)
-            #        V beam → box placed to the RIGHT of beam right edge.
-            #        Vertical beam labels placed above looked identical to H beam labels
-            #        and were ambiguous/misleading on the drawing.
             if o == "H":
                 beam_top = beam["by2"]
                 gap_b    = round(bm_h * 0.30, 4)
                 box_cx   = cx
                 box_cy   = round(beam_top + gap_b + bm_h / 2, 4)
             else:
-                # V beam: box sits to the RIGHT of the beam, vertically centred on beam
                 beam_right = beam["bx2"]
-                gap_b      = round(bm_w * 0.20, 4)   # horizontal gap = 20% of box width
+                gap_b      = round(bm_w * 0.20, 4)
                 box_cx     = round(beam_right + gap_b + bm_w / 2, 4)
-                box_cy     = cy   # vertically centred on beam midpoint
+                box_cy     = cy
 
             draw_centred_box(box_cx, box_cy, bm_w, bm_h,
                              label, th_b,
@@ -613,7 +575,7 @@ def annotate_civil(filepath, mode="both"):
                              "BEAM_LABEL", 1, 25, cw=CW_BEAM, draw_box=False)
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 3 — OVERALL DIMENSIONS  
+    # STEP 3 — OVERALL DIMENSIONS  (DISABLED — overall dims removed per request)
     # ═══════════════════════════════════════════════════════════════════════════
     # dim_off = round(th_dim * 8.0, 4)
 
