@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 import ezdxf, ezdxf.bbox
@@ -31,21 +31,27 @@ def detect_drawing_type(filepath):
         return "civil"
     return "mechanical"
 
-# ─── UPDATED: Now accepts the "mode" query parameter from AutoCAD ───
 @app.post("/annotate")
-async def run_annotate(mode: str = "both", file: UploadFile = File(...)):
+async def run_annotate(mode: str = Form("both"), file: UploadFile = File(...)):
     try:
         tmp=os.path.join(TEMP_DIR,f"in_{uuid.uuid4().hex}.dxf")
         with open(tmp,"wb") as f: f.write(await file.read())
 
-        drawing_type=detect_drawing_type(tmp)
-        print(f"Annotating as: {drawing_type} (Mode: {mode})")
+        # CRITICAL FIX 1: Strip hidden quotes sent by CMD/curl
+        mode_clean = mode.replace('"', '').replace("'", "").strip().lower()
 
-        if drawing_type=="civil":
-            # Passes the specific mode (columns, beams, centerlines, or both) to the civil engine
-            doc=annotate_civil(tmp, mode=mode)
+        # CRITICAL FIX 2: Force Civil routing if a modular command is used to prevent misclassification
+        if mode_clean in ["columns", "beams", "centerlines", "both"]:
+            drawing_type = "civil"
         else:
-            doc=annotate_mechanical(tmp)
+            drawing_type = detect_drawing_type(tmp)
+
+        print(f"Annotating as: {drawing_type} (Mode Received: {mode_clean})")
+
+        if drawing_type == "civil":
+            doc = annotate_civil(tmp, mode=mode_clean)
+        else:
+            doc = annotate_mechanical(tmp)
 
         out=os.path.join(TEMP_DIR,f"annotated_{uuid.uuid4().hex}.dxf")
         doc.saveas(out)
