@@ -254,9 +254,12 @@ def draw_centerlines(doc, msp, columns, extents):
     if "CENTER_LINES" not in doc.layers:
         doc.layers.new("CENTER_LINES")
 
-    # Ensure dashed linetype exists in document
+    # CRITICAL FIX: Safe Linetype creation preventing ezdxf crash
     if "CENTER" not in doc.linetypes:
-        doc.linetypes.add("CENTER", "Center ____ _ ____ _ ____", [1.25, 0.25, -0.25, 0.25, -0.25])
+        try:
+            doc.linetypes.new("CENTER", dxfattribs={"description": "Center ____ _ ____ _ ____", "pattern": [2.0, 1.25, -0.25, 0.25, -0.25]})
+        except:
+            pass
 
     # Determine outer faces (0.000 baseline)
     min_x_face = min(c['cx'] - c['w']/2 for c in columns)
@@ -358,6 +361,7 @@ def draw_centerlines(doc, msp, columns, extents):
         msp.add_lwpolyline([(x, bot_y + ext_len*0.2), (x, bot_y + ext_len*0.1), (text_x, bot_y)], dxfattribs={"layer": "CENTER_LINES", "color": c})
         msp.add_text(lbl, dxfattribs={"insert": (text_x + th*0.5, bot_y - tw(lbl, th) - th*0.5), "height": th, "color": c, "layer": "CENTER_LINES", "rotation": 90})
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN ANNOTATOR
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -382,11 +386,14 @@ def annotate_civil(filepath, mode="both"):
     col_inserts = extract_columns(filepath, extents)
     beams       = extract_beams(filepath, extents)
     print(f"  Cols:{len(col_inserts)}  Beams:{len(beams)}")
-    if not col_inserts: return doc
+    
+    # CRITICAL FIX: Ensure early exit checks don't block independent runs
+    if not col_inserts and not beams: return doc
 
     # ── NEW: CENTERLINES ──────────────────────────────────────────────────────
-    if mode in ["both", "centerlines"]:
-        draw_centerlines(doc, msp, col_inserts, extents)
+    if mode in ["both", "centerlines"] and col_inserts:
+        try: draw_centerlines(doc, msp, col_inserts, extents)
+        except Exception as e: print(f"Centerline Error: {e}")
 
     # ── LAYERS ────────────────────────────────────────────────────────────────
     for nm, col_no, lw in [
@@ -473,7 +480,7 @@ def annotate_civil(filepath, mode="both"):
     # ═══════════════════════════════════════════════════════════════════════════
     # STEP 1 — COLUMN LABEL BOXES 
     # ═══════════════════════════════════════════════════════════════════════════
-    if mode in ["both", "columns"]:
+    if mode in ["both", "columns"] and col_inserts:
         for col in col_inserts:
             cx    = col["cx"]; cy = col["cy"]
             cw    = col["w"];  ch = col["h"]
@@ -525,7 +532,7 @@ def annotate_civil(filepath, mode="both"):
     # ═══════════════════════════════════════════════════════════════════════════
     # STEP 2 — BEAM LABEL BOXES
     # ═══════════════════════════════════════════════════════════════════════════
-    if mode in ["both", "beams"]:
+    if mode in ["both", "beams"] and beams:
         for beam in beams:
             cx    = beam["cx"]; cy = beam["cy"]
             label = beam["label"]
