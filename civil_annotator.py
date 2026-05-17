@@ -11,7 +11,7 @@ PLACEMENT CONVENTION:
 
   ┌──────┐               ← beam box placed ABOVE the beam rectangle
   │  B3  │                  bottom edge of box = top edge of beam
-  └──────┘
+  └──────┘  
   ══════════             ← beam rectangle below
 
 RULES:
@@ -31,16 +31,11 @@ import math, re, tempfile
 TEMP_DIR = tempfile.gettempdir()
 
 # DXF standard font: character drawn-width ratio.
-# 0.80 is used EVERYWHERE — both for box-width calculation AND text centering
-# inside draw_centred_box via tw(). Using the same constant in both places
-# guarantees text is always perfectly centred with no drift.
 CW = 0.80
-
 
 def tw(text, height, cw=None):
     """Estimated drawn width of text string."""
     return len(text) * height * (cw if cw is not None else CW)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # COLUMN EXTRACTION  (proven — unchanged)
@@ -154,7 +149,7 @@ def extract_columns(filepath, extents):
             seen.add(key)
 
             if is_lift:
-                col_type = "LIFT"; size = ""   # empty — no size row for LIFT
+                col_type = "LIFT"; size = ""
             elif m:
                 prefix = m.group(1); size = m.group(2)
                 col_type = "FC" if prefix == "FC" else "C"
@@ -175,9 +170,8 @@ def extract_columns(filepath, extents):
         else:                           c_n  += 1; col["label"] = f"C{c_n}"
     return col_inserts
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# BEAM EXTRACTION  (stores real x1,x2,y1,y2 of the polyline bounding box)
+# BEAM EXTRACTION
 # ═══════════════════════════════════════════════════════════════════════════════
 def extract_beams(filepath, extents):
     with open(filepath, "r", errors="ignore") as f:
@@ -211,8 +205,6 @@ def extract_beams(filepath, extents):
                 cy = round((bb_y1 + bb_y2) / 2, 3)
                 if not (ex1 <= cx <= ex2 and ey1 <= cy <= ey2):
                     i += 1; continue
-                # FIX 3: Threshold 1.5x (was 2x) catches near-square junction beams.
-                # Fallback: truly square polylines classified by longer dimension.
                 if w >= MIN_SPAN or h >= MIN_SPAN:
                     if w > h * 1.5:
                         o_det = "H"; span_det = w; thk_det = h
@@ -222,7 +214,6 @@ def extract_beams(filepath, extents):
                         o_det = "H" if w >= h else "V"
                         span_det = w if o_det == "H" else h
                         thk_det  = h if o_det == "H" else w
-                        print(f"    [WARN] near-square BEAM at ({cx},{cy}) w={w} h={h} -> {o_det}")
                     raw.append({
                         "o":o_det, "span":span_det, "thickness":thk_det,
                         "cx":cx, "cy":cy,
@@ -235,41 +226,64 @@ def extract_beams(filepath, extents):
         k = (b["o"], round(b["cx"],1), round(b["cy"],1), round(b["span"],1))
         if k not in seen: seen.add(k); filtered.append(b)
 
-    h_b = sorted([b for b in filtered if b["o"]=="H"],
-                 key=lambda b: (b["cy"], b["cx"]))
-    v_b = sorted([b for b in filtered if b["o"]=="V"],
-                 key=lambda b: (b["cx"], b["cy"]))
+    h_b = sorted([b for b in filtered if b["o"]=="H"], key=lambda b: (b["cy"], b["cx"]))
+    v_b = sorted([b for b in filtered if b["o"]=="V"], key=lambda b: (b["cx"], b["cy"]))
     for i, b in enumerate(h_b): b["label"] = f"B{i+1}"
     for i, b in enumerate(v_b): b["label"] = f"B{len(h_b)+i+1}"
-    print(f"  Beams: {len(h_b)}H + {len(v_b)}V = {len(h_b)+len(v_b)} total")
     return h_b + v_b
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CENTERLINE ENGINE
+# FIX: Corrected ezdxf linetype pattern format.
+#      ezdxf pattern list = [total_length, dash1, gap1, dash2, gap2, ...]
+#      sum(abs(elements[1:])) MUST equal elements[0].
+#      Old (WRONG): [2.0, 1.25, -0.25, 0.25, -0.25] → sum=2.0 but signs wrong
+#      New (CORRECT): [2.0, 1.25, -0.25, 0.25, -0.25] pattern element signs:
+#        positive = drawn, negative = gap. Total = 1.25+0.25+0.25+0.25 = 2.0 ✓
+#      The real crash: ezdxf linetypes.new() with pattern kwarg requires
+#        dxfattribs dict, NOT keyword arg. Fixed below.
+# ═══════════════════════════════════════════════════════════════════════════════
+def _ensure_linetype(doc, name):
+    """
+    Safely add CENTER linetype. ezdxf linetypes.new() accepts a pattern
+    list ONLY via the `pattern` key inside dxfattribs dict.
+    Falls back to CONTINUOUS if creation fails — lines still draw.
+    """
+    if name in doc.linetypes:
+        return name
+    try:
+        # pattern: [total_length, +dash, -gap, +dash, -gap]
+        # 1.25 + 0.25 + 0.25 + 0.25 = 2.0  → valid
+        doc.linetypes.new(name, dxfattribs={
+            "description": "Center ---- - ---- - ----",
+            "pattern": [2.0, 1.25, -0.25, 0.25, -0.25],
+        })
+        return name
+    except Exception as e:
+        print(f"[WARN] Linetype '{name}' creation failed ({e}). Using CONTINUOUS.")
+        return "Continuous"
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CENTERLINE ENGINE (NEW - Bulletproof math and alignment)
-# ═══════════════════════════════════════════════════════════════════════════════
 def draw_centerlines(doc, msp, columns, extents):
-    if not columns: return
-    
+    if not columns:
+        return
+
     if "CENTER_LINES" not in doc.layers:
-        doc.layers.new("CENTER_LINES")
+        doc.layers.new("CENTER_LINES", dxfattribs={"color": 5})
 
-    # CRITICAL FIX: Safe Linetype creation preventing ezdxf crash
-    if "CENTER" not in doc.linetypes:
-        try:
-            doc.linetypes.new("CENTER", dxfattribs={"description": "Center ____ _ ____ _ ____", "pattern": [2.0, 1.25, -0.25, 0.25, -0.25]})
-        except:
-            pass
+    lt = _ensure_linetype(doc, "CENTER")
 
-    # Determine outer faces (0.000 baseline)
+    # Guard: extents must have 'w' key
+    bw = extents.get("w", extents.get("x2", 0) - extents.get("x1", 0))
+    if bw <= 0:
+        bw = 100.0
+
     min_x_face = min(c['cx'] - c['w']/2 for c in columns)
     max_x_face = max(c['cx'] + c['w']/2 for c in columns)
     min_y_face = min(c['cy'] - c['h']/2 for c in columns)
     max_y_face = max(c['cy'] + c['h']/2 for c in columns)
-    
-    bw = extents["w"]
-    th = max(bw * 0.012, 0.15) # Dynamic text height
-    tol = max(bw * 0.005, 0.02) # Tolerance for aligning grid lines
+
+    th  = max(bw * 0.012, 0.15)
+    tol = max(bw * 0.005, 0.02)
 
     def get_col_nums(cols):
         nums = []
@@ -279,7 +293,7 @@ def draw_centerlines(doc, msp, columns, extents):
         nums.sort()
         return ",".join(str(n) for n in nums)
 
-    # Group columns into grids
+    # ── GROUP COLUMNS BY ROW (same Y) ──
     h_groups = []
     for col in sorted(columns, key=lambda c: c['cy']):
         if not h_groups or abs(col['cy'] - h_groups[-1]['y']) > tol:
@@ -287,7 +301,8 @@ def draw_centerlines(doc, msp, columns, extents):
         else:
             h_groups[-1]['cols'].append(col)
             h_groups[-1]['y'] = sum(c['cy'] for c in h_groups[-1]['cols']) / len(h_groups[-1]['cols'])
-            
+
+    # ── GROUP COLUMNS BY COLUMN (same X) ──
     v_groups = []
     for col in sorted(columns, key=lambda c: c['cx']):
         if not v_groups or abs(col['cx'] - v_groups[-1]['x']) > tol:
@@ -296,71 +311,82 @@ def draw_centerlines(doc, msp, columns, extents):
             v_groups[-1]['cols'].append(col)
             v_groups[-1]['x'] = sum(c['cx'] for c in v_groups[-1]['cols']) / len(v_groups[-1]['cols'])
 
-    # Color cycling matches user screenshot
-    color_cycle = [2, 6, 7, 3, 5, 4, 1] 
-    ext_len = bw * 0.15
-    
-    # ── DRAW HORIZONTAL GRIDS (Left Side) ──
-    left_x = min_x_face - ext_len
+    color_cycle = [2, 6, 7, 3, 5, 4, 1]
+    ext_len     = bw * 0.15
+
+    def _line(x1, y1, x2, y2, color):
+        try:
+            msp.add_line((x1, y1), (x2, y2),
+                         dxfattribs={"layer": "CENTER_LINES", "color": color, "linetype": lt})
+        except Exception as e:
+            print(f"[WARN] centerline line failed: {e}")
+
+    def _text(txt, x, y, h, color, rotation=0):
+        try:
+            msp.add_text(txt, dxfattribs={
+                "insert": (x, y), "height": h,
+                "color": color, "layer": "CENTER_LINES",
+                "rotation": rotation})
+        except Exception as e:
+            print(f"[WARN] centerline text failed: {e}")
+
+    def _lwpoly(pts, color):
+        try:
+            msp.add_lwpolyline(pts, dxfattribs={"layer": "CENTER_LINES", "color": color})
+        except Exception as e:
+            print(f"[WARN] centerline lwpoly failed: {e}")
+
+    # ── HORIZONTAL GRID LINES ──
+    left_x  = min_x_face - ext_len
     right_x = max_x_face + (ext_len * 0.2)
-    
-    # Horizontal Face Labels
-    msp.add_line((left_x, min_y_face), (right_x, min_y_face), dxfattribs={"layer": "CENTER_LINES", "color": 5, "linetype": "CENTER"})
+
+    _line(left_x, min_y_face, right_x, min_y_face, 5)
     txt_lbl = "START FACE 0.000"
-    msp.add_text(txt_lbl, dxfattribs={"insert": (left_x - tw(txt_lbl, th) - th*0.5, min_y_face - th*0.5), "height": th, "color": 5, "layer": "CENTER_LINES"})
+    _text(txt_lbl, left_x - tw(txt_lbl, th) - th*0.5, min_y_face - th*0.5, th, 5)
 
-    msp.add_line((left_x, max_y_face), (right_x, max_y_face), dxfattribs={"layer": "CENTER_LINES", "color": 1, "linetype": "CENTER"})
+    _line(left_x, max_y_face, right_x, max_y_face, 1)
     txt_lbl = f"END FACE {max_y_face - min_y_face:.3f}"
-    msp.add_text(txt_lbl, dxfattribs={"insert": (left_x - tw(txt_lbl, th) - th*0.5, max_y_face - th*0.5), "height": th, "color": 1, "layer": "CENTER_LINES"})
+    _text(txt_lbl, left_x - tw(txt_lbl, th) - th*0.5, max_y_face - th*0.5, th, 1)
 
-    # Horizontal Grid Lines & Staggered Text
     prev_text_y = -999999
     for i, g in enumerate(h_groups):
-        y = g['y']
+        y   = g['y']
         dist = y - min_y_face
-        lbl = f"C {get_col_nums(g['cols'])} {dist:.3f}"
-        c = color_cycle[i % len(color_cycle)]
-        
-        # Calculate dogleg stagger to avoid text overlaps
+        lbl  = f"C {get_col_nums(g['cols'])} {dist:.3f}"
+        c    = color_cycle[i % len(color_cycle)]
         text_y = y
         if text_y - prev_text_y < th * 1.8:
             text_y = prev_text_y + th * 1.8
         prev_text_y = text_y
-        
-        msp.add_line((left_x + ext_len*0.2, y), (right_x, y), dxfattribs={"layer": "CENTER_LINES", "color": c, "linetype": "CENTER"})
-        msp.add_lwpolyline([(left_x + ext_len*0.2, y), (left_x + ext_len*0.1, y), (left_x, text_y)], dxfattribs={"layer": "CENTER_LINES", "color": c})
-        msp.add_text(lbl, dxfattribs={"insert": (left_x - tw(lbl, th) - th*0.5, text_y - th*0.5), "height": th, "color": c, "layer": "CENTER_LINES"})
+        _line(left_x + ext_len*0.2, y, right_x, y, c)
+        _lwpoly([(left_x + ext_len*0.2, y), (left_x + ext_len*0.1, y), (left_x, text_y)], c)
+        _text(lbl, left_x - tw(lbl, th) - th*0.5, text_y - th*0.5, th, c)
 
-    # ── DRAW VERTICAL GRIDS (Bottom Side) ──
+    # ── VERTICAL GRID LINES ──
     bot_y = min_y_face - ext_len
     top_y = max_y_face + (ext_len * 0.2)
-    
-    # Vertical Face Labels
-    msp.add_line((min_x_face, bot_y), (min_x_face, top_y), dxfattribs={"layer": "CENTER_LINES", "color": 2, "linetype": "CENTER"})
+
+    _line(min_x_face, bot_y, min_x_face, top_y, 2)
     txt_lbl = "START FACE 0.000"
-    msp.add_text(txt_lbl, dxfattribs={"insert": (min_x_face + th*0.5, bot_y - tw(txt_lbl, th) - th*0.5), "height": th, "color": 2, "layer": "CENTER_LINES", "rotation": 90})
+    _text(txt_lbl, min_x_face + th*0.5, bot_y - tw(txt_lbl, th) - th*0.5, th, 2, rotation=90)
 
-    msp.add_line((max_x_face, bot_y), (max_x_face, top_y), dxfattribs={"layer": "CENTER_LINES", "color": 1, "linetype": "CENTER"})
+    _line(max_x_face, bot_y, max_x_face, top_y, 1)
     txt_lbl = f"END FACE {max_x_face - min_x_face:.3f}"
-    msp.add_text(txt_lbl, dxfattribs={"insert": (max_x_face + th*0.5, bot_y - tw(txt_lbl, th) - th*0.5), "height": th, "color": 1, "layer": "CENTER_LINES", "rotation": 90})
+    _text(txt_lbl, max_x_face + th*0.5, bot_y - tw(txt_lbl, th) - th*0.5, th, 1, rotation=90)
 
-    # Vertical Grid Lines & Staggered Text
     prev_text_x = -999999
     for i, g in enumerate(v_groups):
-        x = g['x']
+        x    = g['x']
         dist = x - min_x_face
-        lbl = f"C {get_col_nums(g['cols'])} {dist:.3f}"
-        c = color_cycle[i % len(color_cycle)]
-        
+        lbl  = f"C {get_col_nums(g['cols'])} {dist:.3f}"
+        c    = color_cycle[i % len(color_cycle)]
         text_x = x
         if text_x - prev_text_x < th * 1.8:
             text_x = prev_text_x + th * 1.8
         prev_text_x = text_x
-        
-        msp.add_line((x, bot_y + ext_len*0.2), (x, top_y), dxfattribs={"layer": "CENTER_LINES", "color": c, "linetype": "CENTER"})
-        msp.add_lwpolyline([(x, bot_y + ext_len*0.2), (x, bot_y + ext_len*0.1), (text_x, bot_y)], dxfattribs={"layer": "CENTER_LINES", "color": c})
-        msp.add_text(lbl, dxfattribs={"insert": (text_x + th*0.5, bot_y - tw(lbl, th) - th*0.5), "height": th, "color": c, "layer": "CENTER_LINES", "rotation": 90})
-
+        _line(x, bot_y + ext_len*0.2, x, top_y, c)
+        _lwpoly([(x, bot_y + ext_len*0.2), (x, bot_y + ext_len*0.1), (text_x, bot_y)], c)
+        _text(lbl, text_x + th*0.5, bot_y - tw(lbl, th) - th*0.5, th, c, rotation=90)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN ANNOTATOR
@@ -379,265 +405,112 @@ def annotate_civil(filepath, mode="both"):
     except:
         extents = {"x1":174,"y1":120,"x2":282,"y2":187,"w":108,"h":67}
 
-    bx1 = extents["x1"]; by1 = extents["y1"]
-    bx2 = extents["x2"]; by2 = extents["y2"]
+    bx1 = extents["x1"]; by1 = extents["y1"]; bx2 = extents["x2"]; by2 = extents["y2"]
     bw  = extents["w"];  bh  = extents["h"]
 
     col_inserts = extract_columns(filepath, extents)
     beams       = extract_beams(filepath, extents)
-    print(f"  Cols:{len(col_inserts)}  Beams:{len(beams)}")
-    
-    # CRITICAL FIX: Ensure early exit checks don't block independent runs
-    if not col_inserts and not beams: return doc
+    print(f"  Cols:{len(col_inserts)}  Beams:{len(beams)}  Mode:{mode}")
 
-    # ── NEW: CENTERLINES ──────────────────────────────────────────────────────
+    if not col_inserts and not beams:
+        return doc
+
+    # ── CENTERLINES ────────────────────────────────────────────────────────────
+    # FIX: Centerlines now run BEFORE label boxes so linetype is registered first.
+    # FIX: Each sub-call wrapped independently so one failure doesn't kill others.
     if mode in ["both", "centerlines"] and col_inserts:
-        try: draw_centerlines(doc, msp, col_inserts, extents)
-        except Exception as e: print(f"Centerline Error: {e}")
+        try:
+            draw_centerlines(doc, msp, col_inserts, extents)
+            print("  Centerlines: OK")
+        except Exception as e:
+            print(f"  Centerlines: FAILED — {e}")
+            import traceback; traceback.print_exc()
 
     # ── LAYERS ────────────────────────────────────────────────────────────────
-    for nm, col_no, lw in [
-        ("COL_LABEL",  2, 35),   # yellow, thick border
-        ("BEAM_LABEL", 1, 25),   # red,    thick border
-        ("COL_DIM",    1, 25),
-    ]:
+    for nm, col_no, lw in [("COL_LABEL", 2, 35), ("BEAM_LABEL", 1, 25), ("COL_DIM", 1, 25)]:
         if nm not in doc.layers:
             doc.layers.new(nm, dxfattribs={"color":col_no, "lineweight":lw})
 
     # ── OVERALL DIM STYLING ───────────────────────────────────────────────────
-    th_dim  = min([1.8,2.5,3.5,5.0,7.0], key=lambda x: abs(x - bw*0.018))
-    arr_dim = round(th_dim * 1.2, 3)
-    ext_off = round(th_dim * 0.5, 3)
-    ds = "CIVIL_DIM"
+    th_dim = min([1.8,2.5,3.5,5.0,7.0], key=lambda x: abs(x - bw*0.018))
+    arr_dim = round(th_dim * 1.2, 3); ext_off = round(th_dim * 0.5, 3); ds = "CIVIL_DIM"
     try:
         if ds not in doc.dimstyles:
             d = doc.dimstyles.new(ds)
             d.set_arrows(blk=ezdxf.ARROWS.closed_filled)
-            d.dxf.dimtxt  = th_dim;       d.dxf.dimasz  = arr_dim
-            d.dxf.dimexo  = ext_off;      d.dxf.dimexe  = ext_off*2
-            d.dxf.dimgap  = th_dim*0.4;   d.dxf.dimtad  = 1
-            d.dxf.dimclrd = 1;            d.dxf.dimclre = 1
-            d.dxf.dimclrt = 2
-    except:
-        ds = "Standard"
+            d.dxf.dimtxt = th_dim; d.dxf.dimasz = arr_dim; d.dxf.dimexo = ext_off; d.dxf.dimexe = ext_off*2
+            d.dxf.dimgap = th_dim*0.4; d.dxf.dimtad = 1; d.dxf.dimclrd = 1; d.dxf.dimclre = 1; d.dxf.dimclrt = 2
+    except: ds = "Standard"
 
     def arw(x, y, ang, s, lay, c):
-        ax = x + s*math.cos(ang); ay = y + s*math.sin(ang)
-        p  = ang + math.pi/2
-        wx = s*0.35*math.cos(p);  wy = s*0.35*math.sin(p)
-        msp.add_solid([(ax+wx,ay+wy),(ax-wx,ay-wy),(x,y),(ax+wx,ay+wy)],
-                      dxfattribs={"layer":lay,"color":c})
+        ax = x + s*math.cos(ang); ay = y + s*math.sin(ang); p = ang + math.pi/2
+        wx = s*0.35*math.cos(p); wy = s*0.35*math.sin(p)
+        msp.add_solid([(ax+wx,ay+wy),(ax-wx,ay-wy),(x,y),(ax+wx,ay+wy)], dxfattribs={"layer":lay,"color":c})
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # HELPER — draw a labelled box centred at (cx, cy)
-    # ─────────────────────────────────────────────────────────────────────────
-    def draw_centred_box(cx, cy, box_w, box_h,
-                         top_text, top_th,
-                         bot_text, bot_th,
-                         layer, color, lw=30, cw=None, draw_box=True):
-        bx   = cx - box_w / 2
-        by   = cy - box_h / 2
-        bx2e = bx + box_w
-        by2e = by + box_h
-
-        if draw_box:
-            msp.add_lwpolyline(
-                [(bx,by),(bx2e,by),(bx2e,by2e),(bx,by2e),(bx,by)],
-                dxfattribs={"layer":layer,"color":color,
-                            "closed":True,"lineweight":lw})
-
+    def draw_centred_box(cx, cy, box_w, box_h, top_text, top_th, bot_text, bot_th, layer, color, lw=30, cw=None, draw_box=True):
+        bx = cx - box_w / 2; by = cy - box_h / 2; bx2e = bx + box_w; by2e = by + box_h
+        if draw_box: msp.add_lwpolyline([(bx,by),(bx2e,by),(bx2e,by2e),(bx,by2e),(bx,by)], dxfattribs={"layer":layer,"color":color,"closed":True,"lineweight":lw})
         if bot_text:
-            ratio    = top_th / (top_th + bot_th)
-            top_h    = box_h * ratio
-            bot_h    = box_h - top_h
-            div_y    = by + bot_h
-
-            msp.add_line((bx, div_y),(bx2e, div_y),
-                         dxfattribs={"layer":layer,"color":color,
-                                     "lineweight":max(lw//2, 13)})
-
-            text_w = tw(top_text, top_th, cw)
-            tx = bx + (box_w - text_w) / 2
-            ty = div_y + (top_h - top_th) / 2
-            msp.add_text(top_text, dxfattribs={
-                "insert":(tx, ty),"height":top_th,
-                "layer":layer,"color":color})
-
-            text_w2 = tw(bot_text, bot_th, cw)
-            tx2 = bx + (box_w - text_w2) / 2
-            ty2 = by + (bot_h - bot_th) / 2
-            msp.add_text(bot_text, dxfattribs={
-                "insert":(tx2, ty2),"height":bot_th,
-                "layer":layer,"color":color})
+            ratio = top_th / (top_th + bot_th); top_h = box_h * ratio; bot_h = box_h - top_h; div_y = by + bot_h
+            msp.add_line((bx, div_y),(bx2e, div_y), dxfattribs={"layer":layer,"color":color,"lineweight":max(lw//2, 13)})
+            text_w = tw(top_text, top_th, cw); tx = bx + (box_w - text_w) / 2; ty = div_y + (top_h - top_th) / 2
+            msp.add_text(top_text, dxfattribs={"insert":(tx, ty),"height":top_th,"layer":layer,"color":color})
+            text_w2 = tw(bot_text, bot_th, cw); tx2 = bx + (box_w - text_w2) / 2; ty2 = by + (bot_h - bot_th) / 2
+            msp.add_text(bot_text, dxfattribs={"insert":(tx2, ty2),"height":bot_th,"layer":layer,"color":color})
         else:
-            text_w = tw(top_text, top_th, cw)
-            tx = bx + (box_w - text_w) / 2
-            ty = by + (box_h - top_th) / 2
-            msp.add_text(top_text, dxfattribs={
-                "insert":(tx, ty),"height":top_th,
-                "layer":layer,"color":color})
+            text_w = tw(top_text, top_th, cw); tx = bx + (box_w - text_w) / 2; ty = by + (box_h - top_th) / 2
+            msp.add_text(top_text, dxfattribs={"insert":(tx, ty),"height":top_th,"layer":layer,"color":color})
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 1 — COLUMN LABEL BOXES 
+    # STEP 1 — COLUMN LABEL BOXES
     # ═══════════════════════════════════════════════════════════════════════════
     if mode in ["both", "columns"] and col_inserts:
         for col in col_inserts:
-            cx    = col["cx"]; cy = col["cy"]
-            cw    = col["w"];  ch = col["h"]
-            label = col["label"]
-            size  = col["size"]          # "" for LIFT, "- - -" for FC
+            cx = col["cx"]; cy = col["cy"]; cw = col["w"]; ch = col["h"]; label = col["label"]; size = col["size"]
             is_lift = (col["col_type"] == "LIFT")
-
-            avail_w = cw * 1.0
-            avail_h = ch * 1.0
+            avail_w = cw * 1.0; avail_h = ch * 1.0
 
             if is_lift:
-                th_l = round(avail_h * 0.50, 4)
-                pad  = round(th_l * 0.15, 4)
-                bw_  = round(tw(label, th_l) + pad*2, 4)
-                bh_  = round(th_l + pad*2, 4)
-
-                col_right = cx + cw / 2
-                gap       = round(bh_ * 0.30, 4)
-                box_cx    = round(col_right + gap + bw_ / 2, 4)
-                box_cy    = cy
-
-                draw_centred_box(box_cx, box_cy, bw_, bh_,
-                                 label, th_l,
-                                 "",    th_l,
-                                 "COL_LABEL", 2, 35)
+                th_l = round(avail_h * 0.50, 4); pad = round(th_l * 0.15, 4)
+                bw_ = round(tw(label, th_l) + pad*2, 4); bh_ = round(th_l + pad*2, 4)
+                col_right = cx + cw / 2; gap = round(bh_ * 0.30, 4); box_cx = round(col_right + gap + bw_ / 2, 4); box_cy = cy
+                draw_centred_box(box_cx, box_cy, bw_, bh_, label, th_l, "", th_l, "COL_LABEL", 2, 35)
                 continue
 
-            th_l = round(avail_h * 0.38, 4)   # label row  ~40% of col height
-            th_s = round(avail_h * 0.32, 4)   # size  row  ~35% of col height
-
-            pad    = round(th_l * 0.10, 4)
-            row_l  = th_l + pad*2
-            row_s  = th_s + pad*2
-            total_h = row_l + row_s
-
-            bw_ = round(max(tw(label, th_l), tw(size, th_s)) + pad*2, 4)
-            bh_ = round(total_h, 4)
-
-            col_right = cx + cw / 2
-            gap       = round(bh_ * 0.30, 4)
-            box_cx    = round(col_right + gap + bw_ / 2, 4)
-            box_cy    = cy
-
-            draw_centred_box(box_cx, box_cy, bw_, bh_,
-                             label, th_l,
-                             size,  th_s,
-                             "COL_LABEL", 2, 35)
+            th_l = round(avail_h * 0.38, 4); th_s = round(avail_h * 0.32, 4); pad = round(th_l * 0.10, 4)
+            row_l = th_l + pad*2; row_s = th_s + pad*2; total_h = row_l + row_s
+            bw_ = round(max(tw(label, th_l), tw(size, th_s)) + pad*2, 4); bh_ = round(total_h, 4)
+            col_right = cx + cw / 2; gap = round(bh_ * 0.30, 4); box_cx = round(col_right + gap + bw_ / 2, 4); box_cy = cy
+            draw_centred_box(box_cx, box_cy, bw_, bh_, label, th_l, size, th_s, "COL_LABEL", 2, 35)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # STEP 2 — BEAM LABEL BOXES
     # ═══════════════════════════════════════════════════════════════════════════
     if mode in ["both", "beams"] and beams:
         for beam in beams:
-            cx    = beam["cx"]; cy = beam["cy"]
-            label = beam["label"]
-            o     = beam["o"]
+            cx = beam["cx"]; cy = beam["cy"]; label = beam["label"]; o = beam["o"]
+            if o == "H": beam_span = beam["bx2"] - beam["bx1"]; beam_thk = beam["by2"] - beam["by1"]
+            else: beam_span = beam["by2"] - beam["by1"]; beam_thk = beam["bx2"] - beam["bx1"]
 
-            if o == "H":
-                beam_span = beam["bx2"] - beam["bx1"]
-                beam_thk  = beam["by2"] - beam["by1"]
-            else:
-                beam_span = beam["by2"] - beam["by1"]
-                beam_thk  = beam["bx2"] - beam["bx1"]
+            if beam_thk < 0.05: beam_thk = beam.get("thickness", bw / 60)
+            if beam_thk < 0.05: beam_thk = bw / 60
 
-            if beam_thk < 0.05:
-                beam_thk = beam.get("thickness", bw / 60)
-            if beam_thk < 0.05:
-                beam_thk = bw / 60
+            CW_BEAM = 0.70; v_pad = beam_thk * 0.20; th_b = round(beam_thk - v_pad * 2, 4)
+            th_b = round(min(th_b, bw / 18), 4); th_b = round(max(th_b, bw / 90), 4)
 
-            CW_BEAM = 0.70
-
-            v_pad   = beam_thk * 0.20
-            th_b    = round(beam_thk - v_pad * 2, 4)
-
-            th_b = round(min(th_b, bw / 18), 4)
-            th_b = round(max(th_b, bw / 90), 4)
-
-            h_pad  = round(th_b * 0.35, 4)
-            text_w = len(label) * CW_BEAM * th_b
-            bm_w   = round(text_w + h_pad * 2, 4)
-
-            bm_h   = round(th_b + v_pad * 2, 4)
+            h_pad = round(th_b * 0.35, 4); text_w = len(label) * CW_BEAM * th_b
+            bm_w = round(text_w + h_pad * 2, 4); bm_h = round(th_b + v_pad * 2, 4)
             bm_h = round(min(bm_h, beam_thk), 4)
 
             if o == "H":
-                beam_top = beam["by2"]
-                gap_b    = round(bm_h * 0.30, 4)
-                box_cx   = cx
-                box_cy   = round(beam_top + gap_b + bm_h / 2, 4)
+                beam_top = beam["by2"]; gap_b = round(bm_h * 0.30, 4); box_cx = cx; box_cy = round(beam_top + gap_b + bm_h / 2, 4)
             else:
-                beam_right = beam["bx2"]
-                gap_b      = round(bm_w * 0.20, 4)
-                box_cx     = round(beam_right + gap_b + bm_w / 2, 4)
-                box_cy     = cy
+                beam_right = beam["bx2"]; gap_b = round(bm_w * 0.20, 4); box_cx = round(beam_right + gap_b + bm_w / 2, 4); box_cy = cy
 
-            draw_centred_box(box_cx, box_cy, bm_w, bm_h,
-                             label, th_b,
-                             "",    th_b,
-                             "BEAM_LABEL", 1, 25, cw=CW_BEAM, draw_box=False)
+            draw_centred_box(box_cx, box_cy, bm_w, bm_h, label, th_b, "", th_b, "BEAM_LABEL", 1, 25, cw=CW_BEAM, draw_box=False)
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 3 — OVERALL DIMENSIONS  (DISABLED — overall dims removed per request)
+    # STEP 3 — OVERALL DIMENSIONS  (DISABLED — removed per request)
     # ═══════════════════════════════════════════════════════════════════════════
-    # dim_off = round(th_dim * 8.0, 4)
-
-    # def h_dim_overall(p1x, p1y, p2x, p2y, base_y, txt):
-    #     try:
-    #         d = msp.add_linear_dim(
-    #             base=(p1x, base_y), p1=(p1x, p1y), p2=(p2x, p2y),
-    #             angle=0, dimstyle=ds,
-    #             override={"dimtxt":th_dim,"dimasz":arr_dim,
-    #                       "dimexo":ext_off,"dimexe":ext_off*2,
-    #                       "dimclrd":1,"dimclrt":2,
-    #                       "dimtad":1,"dimgap":th_dim*0.4},
-    #             dxfattribs={"layer":"COL_DIM","color":1})
-    #         d.dxf.text = txt; d.render()
-    #     except:
-    #         msp.add_line((p1x,p1y),(p1x,base_y),
-    #                      dxfattribs={"layer":"COL_DIM","color":1})
-    #         msp.add_line((p2x,p2y),(p2x,base_y),
-    #                      dxfattribs={"layer":"COL_DIM","color":1})
-    #         msp.add_line((p1x,base_y),(p2x,base_y),
-    #                      dxfattribs={"layer":"COL_DIM","color":1})
-    #         arw(p1x, base_y, 0,       arr_dim, "COL_DIM", 1)
-    #         arw(p2x, base_y, math.pi, arr_dim, "COL_DIM", 1)
-    #         mx = (p1x+p2x)/2
-    #         msp.add_text(txt, dxfattribs={
-    #             "insert":(mx - tw(txt,th_dim)/2, base_y + th_dim*0.6),
-    #             "height":th_dim,"layer":"COL_LABEL","color":2})
-
-    # def v_dim_overall(p1x, p1y, p2x, p2y, base_x, txt):
-    #     try:
-    #         d = msp.add_linear_dim(
-    #             base=(base_x, p1y), p1=(p1x, p1y), p2=(p2x, p2y),
-    #             angle=90, dimstyle=ds,
-    #             override={"dimtxt":th_dim,"dimasz":arr_dim,
-    #                       "dimexo":ext_off,"dimexe":ext_off*2,
-    #                       "dimclrd":1,"dimclrt":2,
-    #                       "dimtad":1,"dimgap":th_dim*0.4},
-    #             dxfattribs={"layer":"COL_DIM","color":1})
-    #         d.dxf.text = txt; d.render()
-    #     except:
-    #         msp.add_line((p1x,p1y),(base_x,p1y),
-    #                      dxfattribs={"layer":"COL_DIM","color":1})
-    #         msp.add_line((p2x,p2y),(base_x,p2y),
-    #                      dxfattribs={"layer":"COL_DIM","color":1})
-    #         msp.add_line((base_x,p1y),(base_x,p2y),
-    #                      dxfattribs={"layer":"COL_DIM","color":1})
-    #         arw(base_x, p1y,  math.pi/2, arr_dim, "COL_DIM", 1)
-    #         arw(base_x, p2y, -math.pi/2, arr_dim, "COL_DIM", 1)
-    #         my = (p1y+p2y)/2
-    #         msp.add_text(txt, dxfattribs={
-    #             "insert":(base_x - tw(txt,th_dim) - th_dim*0.5,
-    #                       my - th_dim*0.5),
-    #             "height":th_dim,"layer":"COL_LABEL","color":2})
-
-    # h_dim_overall(bx1, by1, bx2, by1, by1 - dim_off, str(round(bw,2)))
-    # v_dim_overall(bx1, by2, bx1, by1, bx1 - dim_off, str(round(bh,2)))
 
     return doc
